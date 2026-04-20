@@ -50,6 +50,27 @@ const getRelationsSourceForOperation = (
           style: arrowLineStyles,
         },
       ]
+    case 'OP_CHECKSIGADD':
+      return [
+        {
+          targetId: `item${currentIndex}-0`,
+          sourceAnchor: 'left',
+          targetAnchor: 'right',
+          style: arrowLineStyles,
+        },
+        {
+          targetId: `item${currentIndex}-1`,
+          sourceAnchor: 'left',
+          targetAnchor: 'right',
+          style: arrowLineStyles,
+        },
+        {
+          targetId: `item${currentIndex}-2`,
+          sourceAnchor: 'left',
+          targetAnchor: 'right',
+          style: arrowLineStyles,
+        },
+      ]
     case 'OP_DUP':
     case 'OP_SIZE':
     case 'OP_SHA256':
@@ -128,6 +149,7 @@ const getRelationsTargetForOperations = (operation: string): Number[] => {
     case 'OP_HASH160':
     case 'OP_HASH256':
     case 'OP_CHECKSIG':
+    case 'OP_CHECKSIGADD':
     case 'OP_CHECKMULTISIG':
       return [0]
     case 'OP_DUP':
