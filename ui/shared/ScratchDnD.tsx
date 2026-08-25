@@ -1,11 +1,14 @@
 'use client'
 
 import React, { Component } from 'react'
+import { createPortal } from 'react-dom'
 import {
   closestCenter,
   DndContext,
   DragEndEvent,
+  DragOverlay,
   DragStartEvent,
+  PointerSensor,
   useDraggable,
   useDroppable,
 } from '@dnd-kit/core'
@@ -104,8 +107,12 @@ const SortableScriptItem = ({
     data: { type: 'script', item, listId } as DragItemData,
   })
 
+  // Translate only: the sortable transform includes a scale component that
+  // distorts items of different widths. The dragged item itself is hidden in
+  // place (the DragOverlay renders the moving copy) so it never drags the
+  // scroll container into overflow.
   const style = {
-    transform: CSS.Transform.toString(transform),
+    transform: isDragging ? undefined : CSS.Translate.toString(transform),
     transition,
   }
 
@@ -117,7 +124,7 @@ const SortableScriptItem = ({
       className={clsx(
         'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white',
         {
-          'opacity-60': isDragging,
+          'opacity-0': isDragging,
         }
       )}
       {...attributes}
@@ -156,21 +163,18 @@ const DraggableToolboxItem = ({
   item: ItemType
   onClick: (item: ItemType) => void
 }) => {
-  const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({
-      id: `${TOOLBOX_ID_PREFIX}${item.id}`,
-      data: { type: 'toolbox', item } as DragItemData,
-    })
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `${TOOLBOX_ID_PREFIX}${item.id}`,
+    data: { type: 'toolbox', item } as DragItemData,
+  })
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-  }
-
+  // The toolbox item stays in place while dragging; the DragOverlay renders
+  // the copy that follows the pointer, so the scrollable toolbox never
+  // overflows mid-drag.
   return (
     <div
       id={item.id}
       ref={setNodeRef}
-      style={style}
       className={clsx(
         'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white',
         {
@@ -216,6 +220,7 @@ interface ScratchDndState {
   enabledOpcodes: boolean
   opPushValues: { [key: string]: string }
   groupedItems: Group[]
+  activeDrag: DragItemData | null
 }
 
 export default class ScratchDnd extends Component<
@@ -276,8 +281,18 @@ export default class ScratchDnd extends Component<
       groupedItems,
       enabledOpcodes,
       opPushValues,
+      activeDrag: null,
     }
   }
+
+  // A small activation distance keeps plain clicks on toolbox items working
+  // as click-to-add instead of being swallowed as zero-distance drags.
+  sensors = [
+    {
+      sensor: PointerSensor,
+      options: { activationConstraint: { distance: 5 } },
+    },
+  ]
 
   handleOpPushChange = (
     id: string,
@@ -424,13 +439,19 @@ export default class ScratchDnd extends Component<
     return index === -1 ? state.dynamicState[listId].length : index
   }
 
-  handleDragStart = (_event: DragStartEvent) => {
-    // Reserved for future drag overlay or analytics
+  handleDragStart = (event: DragStartEvent) => {
+    const activeData = event.active.data.current as DragItemData | undefined
+    this.setState({ activeDrag: activeData ?? null })
+  }
+
+  handleDragCancel = () => {
+    this.setState({ activeDrag: null })
   }
 
   handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
     const activeData = active.data.current as DragItemData | undefined
+    this.setState({ activeDrag: null })
     if (!activeData) return
 
     const overId = over?.id ? String(over.id) : null
@@ -590,9 +611,11 @@ export default class ScratchDnd extends Component<
   render() {
     return (
       <DndContext
+        sensors={this.sensors}
         collisionDetection={closestCenter}
         onDragStart={this.handleDragStart}
         onDragEnd={this.handleDragEnd}
+        onDragCancel={this.handleDragCancel}
       >
         {Object.keys(this.state.dynamicState).map((listId) => {
           const listItems = this.state.dynamicState[listId]
@@ -679,6 +702,40 @@ export default class ScratchDnd extends Component<
             Paste From Clipboard
           </button>
         </div>
+        {typeof document !== 'undefined' &&
+          createPortal(
+            <DragOverlay>
+              {this.state.activeDrag && (
+                <div className="flex h-[25px] cursor-grabbing select-none items-center rounded-sm bg-black/30 font-space-mono text-[13px] font-normal text-white">
+                  <span
+                    className={clsx('flex items-center whitespace-nowrap', {
+                      'px-1.5':
+                        this.state.activeDrag.item.content !== 'OP_PUSH',
+                      'pl-1.5':
+                        this.state.activeDrag.item.content === 'OP_PUSH',
+                    })}
+                  >
+                    {this.state.activeDrag.item.content}
+                    {this.state.activeDrag.item.content === 'OP_PUSH' && (
+                      <span
+                        className={clsx(
+                          'ml-2 mr-1 flex h-5 items-center rounded-sm bg-white/20 px-1',
+                          this.state.opPushValues[this.state.activeDrag.item.id]
+                            ? 'text-white'
+                            : 'text-white/50'
+                        )}
+                      >
+                        {this.state.opPushValues[
+                          this.state.activeDrag.item.id
+                        ] || 'PUSH_DATA'}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              )}
+            </DragOverlay>,
+            document.body
+          )}
       </DndContext>
     )
   }
