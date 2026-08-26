@@ -1,13 +1,24 @@
 'use client'
 
-import { Component } from 'react'
+import React, { Component } from 'react'
+import { createPortal } from 'react-dom'
 import {
-  DragDropContext,
-  Draggable,
-  Droppable,
-  DropResult,
-  DraggableLocation,
-} from 'react-beautiful-dnd'
+  closestCenter,
+  DndContext,
+  DragEndEvent,
+  DragOverlay,
+  DragStartEvent,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+} from '@dnd-kit/core'
+import {
+  arrayMove,
+  horizontalListSortingStrategy,
+  SortableContext,
+  useSortable,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { uuid } from 'utils'
 import clsx from 'clsx'
 import { OpCodeTypes } from '../OpCodeParser/OpFunctions'
@@ -32,58 +43,13 @@ type StateType = {
 const internalOpcodes: string[] = ['INITIAL_STACK']
 const experimentalOpCodes: string[] = ['OP_CAT']
 
-const reorder = (
-  list: ItemType[],
-  startIndex: number,
-  endIndex: number
-): ItemType[] => {
-  const result = Array.from(list)
-  const [removed] = result.splice(startIndex, 1)
-  result.splice(endIndex, 0, removed)
+const LIST_ID_PREFIX = 'list-'
+const TOOLBOX_ID_PREFIX = 'toolbox-'
 
-  return result
-}
-
-const copy = (
-  source: ItemType[],
-  destination: ItemType[],
-  droppableSource: DraggableLocation,
-  droppableDestination: DraggableLocation
-): ItemType[] => {
-  const sourceClone = Array.from(source)
-  const destClone = Array.from(destination)
-  const item = sourceClone[droppableSource.index]
-
-  destClone.splice(droppableDestination.index, 0, { ...item, id: uuid() })
-  return destClone
-}
-
-const move = (
-  source: ItemType[],
-  destination: ItemType[],
-  droppableSource: DraggableLocation,
-  droppableDestination: DraggableLocation
-): StateType => {
-  const sourceClone = Array.from(source)
-  const destClone = Array.from(destination)
-  const [removed] = sourceClone.splice(droppableSource.index, 1)
-
-  destClone.splice(droppableDestination.index, 0, removed)
-
-  const result: StateType = {}
-  result[droppableSource.droppableId] = sourceClone
-  result[droppableDestination.droppableId] = destClone
-
-  return result
-}
-
-const remove = (
-  source: ItemType[],
-  droppableSource: DraggableLocation
-): ItemType[] => {
-  const sourceClone = Array.from(source)
-  sourceClone.splice(droppableSource.index, 1)
-  return sourceClone
+type DragItemData = {
+  type: 'toolbox' | 'script'
+  item: ItemType
+  listId?: string
 }
 
 let ITEMS: ItemType[] = Object.keys(OpCodeTypes)
@@ -94,6 +60,153 @@ let ITEMS: ItemType[] = Object.keys(OpCodeTypes)
     content: item,
     category: OpCodeTypes[item],
   }))
+
+const getListDroppableId = (listId: string) => `${LIST_ID_PREFIX}${listId}`
+
+const ScriptDropZone = ({
+  id,
+  className,
+  children,
+}: {
+  id: string
+  className: string
+  children: React.ReactNode
+}) => {
+  const { setNodeRef } = useDroppable({ id })
+  return (
+    <div ref={setNodeRef} className={className}>
+      {children}
+    </div>
+  )
+}
+
+const SortableScriptItem = ({
+  item,
+  listId,
+  opPushValue,
+  onOpPushChange,
+}: {
+  item: ItemType
+  listId: string
+  opPushValue?: string
+  onOpPushChange: (
+    id: string,
+    value: string,
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => void
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: item.id,
+    data: { type: 'script', item, listId } as DragItemData,
+  })
+
+  // Translate only: the sortable transform includes a scale component that
+  // distorts items of different widths. The dragged item itself is hidden in
+  // place (the DragOverlay renders the moving copy) so it never drags the
+  // scroll container into overflow.
+  const style = {
+    transform: isDragging ? undefined : CSS.Translate.toString(transform),
+    transition,
+  }
+
+  return (
+    <div
+      id={item.id}
+      ref={setNodeRef}
+      style={style}
+      className={clsx(
+        'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white',
+        {
+          'opacity-0': isDragging,
+        }
+      )}
+      {...attributes}
+      {...listeners}
+    >
+      <span
+        className={clsx('flex items-center whitespace-nowrap', {
+          'px-1.5': item.content !== 'OP_PUSH',
+          'pl-1.5': item.content === 'OP_PUSH',
+        })}
+      >
+        {item.content}
+        {item.content === 'OP_PUSH' && (
+          <input
+            key={item.id}
+            id={item.id}
+            className="ml-2 mr-1 h-5 w-auto grow bg-white/20 px-1 text-white placeholder:text-white/50"
+            placeholder="PUSH_DATA"
+            type="text"
+            value={opPushValue || ''}
+            onPointerDown={(event) => event.stopPropagation()}
+            onChange={(event) =>
+              onOpPushChange(item.id, event.target.value, event)
+            }
+          />
+        )}
+      </span>
+    </div>
+  )
+}
+
+const DraggableToolboxItem = ({
+  item,
+  onClick,
+}: {
+  item: ItemType
+  onClick: (item: ItemType) => void
+}) => {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `${TOOLBOX_ID_PREFIX}${item.id}`,
+    data: { type: 'toolbox', item } as DragItemData,
+  })
+
+  // The toolbox item stays in place while dragging; the DragOverlay renders
+  // the copy that follows the pointer, so the scrollable toolbox never
+  // overflows mid-drag.
+  return (
+    <div
+      id={item.id}
+      ref={setNodeRef}
+      className={clsx(
+        'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white',
+        {
+          'opacity-60': isDragging,
+        }
+      )}
+      onClick={() => onClick(item)}
+      {...attributes}
+      {...listeners}
+    >
+      <span
+        className={clsx('flex items-center', {
+          'px-1.5': item.content !== 'OP_PUSH',
+          'pl-1.5': item.content === 'OP_PUSH',
+        })}
+      >
+        {item.content === 'OP_PUSH' && (
+          <input
+            key={item.id}
+            id={item.id}
+            className={clsx(
+              'pointer-events-none ml-2 mr-1 w-auto cursor-text rounded-sm bg-white/20 px-1 text-left placeholder:text-white/50'
+            )}
+            type="text"
+            placeholder="PUSH_DATA"
+          />
+        )}
+        {item.content}
+      </span>
+    </div>
+  )
+}
 
 interface ScratchDndProps {
   items?: string[]
@@ -107,6 +220,7 @@ interface ScratchDndState {
   enabledOpcodes: boolean
   opPushValues: { [key: string]: string }
   groupedItems: Group[]
+  activeDrag: DragItemData | null
 }
 
 export default class ScratchDnd extends Component<
@@ -167,8 +281,18 @@ export default class ScratchDnd extends Component<
       groupedItems,
       enabledOpcodes,
       opPushValues,
+      activeDrag: null,
     }
   }
+
+  // A small activation distance keeps plain clicks on toolbox items working
+  // as click-to-add instead of being swallowed as zero-distance drags.
+  sensors = [
+    {
+      sensor: PointerSensor,
+      options: { activationConstraint: { distance: 5 } },
+    },
+  ]
 
   handleOpPushChange = (
     id: string,
@@ -283,61 +407,148 @@ export default class ScratchDnd extends Component<
     }))
   }
 
-  onDragEnd = (result: DropResult) => {
-    const { source, destination } = result
+  getListIdByItemId = (state: ScratchDndState, itemId: string) => {
+    return (
+      Object.keys(state.dynamicState).find((listId) =>
+        state.dynamicState[listId].some((item) => item.id === itemId)
+      ) || null
+    )
+  }
 
-    if (!destination) {
-      if (source.droppableId !== 'ITEMS') {
-        const newState = { ...this.state.dynamicState }
-        const newSourceList = remove(newState[source.droppableId], source)
+  getOverListId = (state: ScratchDndState, overId: string | null) => {
+    if (!overId) return null
+    if (overId.startsWith(LIST_ID_PREFIX)) {
+      return overId.slice(LIST_ID_PREFIX.length)
+    }
+    return this.getListIdByItemId(state, overId)
+  }
 
-        this.setState({
-          dynamicState: {
-            ...newState,
-            [source.droppableId]: newSourceList,
-          },
-        })
+  getItemIndex = (state: ScratchDndState, listId: string, itemId: string) => {
+    return state.dynamicState[listId].findIndex((item) => item.id === itemId)
+  }
+
+  getInsertIndex = (
+    state: ScratchDndState,
+    listId: string,
+    overId: string | null
+  ) => {
+    if (!overId || overId.startsWith(LIST_ID_PREFIX)) {
+      return state.dynamicState[listId].length
+    }
+    const index = this.getItemIndex(state, listId, overId)
+    return index === -1 ? state.dynamicState[listId].length : index
+  }
+
+  handleDragStart = (event: DragStartEvent) => {
+    const activeData = event.active.data.current as DragItemData | undefined
+    this.setState({ activeDrag: activeData ?? null })
+  }
+
+  handleDragCancel = () => {
+    this.setState({ activeDrag: null })
+  }
+
+  handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    const activeData = active.data.current as DragItemData | undefined
+    this.setState({ activeDrag: null })
+    if (!activeData) return
+
+    const overId = over?.id ? String(over.id) : null
+
+    this.setState((prevState) => {
+      const overListId = this.getOverListId(prevState, overId)
+      const activeListId =
+        activeData.listId ||
+        this.getListIdByItemId(prevState, activeData.item.id)
+
+      if (!overListId) {
+        if (activeData.type === 'script' && activeListId) {
+          const updatedList = prevState.dynamicState[activeListId].filter(
+            (item) => item.id !== activeData.item.id
+          )
+          const updatedOpPushValues = { ...prevState.opPushValues }
+          delete updatedOpPushValues[activeData.item.id]
+
+          return {
+            dynamicState: {
+              ...prevState.dynamicState,
+              [activeListId]: updatedList,
+            },
+            opPushValues: updatedOpPushValues,
+          }
+        }
+        return null
       }
-      return
-    }
 
-    switch (source.droppableId) {
-      case destination.droppableId:
-        this.setState({
+      if (activeData.type === 'toolbox') {
+        const insertIndex = this.getInsertIndex(prevState, overListId, overId)
+        const updatedList = [...prevState.dynamicState[overListId]]
+        updatedList.splice(insertIndex, 0, { ...activeData.item, id: uuid() })
+
+        return {
           dynamicState: {
-            ...this.state.dynamicState,
-            [destination.droppableId]: reorder(
-              this.state.dynamicState[source.droppableId],
-              source.index,
-              destination.index
+            ...prevState.dynamicState,
+            [overListId]: updatedList,
+          },
+          opPushValues: prevState.opPushValues,
+        }
+      }
+
+      if (!activeListId) {
+        return null
+      }
+
+      if (activeListId === overListId) {
+        const activeIndex = this.getItemIndex(
+          prevState,
+          activeListId,
+          activeData.item.id
+        )
+        const overIndex = this.getItemIndex(prevState, overListId, overId || '')
+        if (activeIndex === -1 || overIndex === -1) {
+          return null
+        }
+        if (activeIndex === overIndex) {
+          return null
+        }
+
+        return {
+          dynamicState: {
+            ...prevState.dynamicState,
+            [activeListId]: arrayMove(
+              prevState.dynamicState[activeListId],
+              activeIndex,
+              overIndex
             ),
           },
-        })
-        break
-      case 'ITEMS':
-        this.setState({
-          dynamicState: {
-            ...this.state.dynamicState,
-            [destination.droppableId]: copy(
-              ITEMS,
-              this.state.dynamicState[destination.droppableId],
-              source,
-              destination
-            ),
-          },
-        })
-        break
-      default:
-        this.setState({
-          dynamicState: move(
-            this.state.dynamicState[source.droppableId],
-            this.state.dynamicState[destination.droppableId],
-            source,
-            destination
-          ),
-        })
-        break
-    }
+          opPushValues: prevState.opPushValues,
+        }
+      }
+
+      const sourceItems = [...prevState.dynamicState[activeListId]]
+      const destinationItems = [...prevState.dynamicState[overListId]]
+      const sourceIndex = this.getItemIndex(
+        prevState,
+        activeListId,
+        activeData.item.id
+      )
+      if (sourceIndex === -1) {
+        return null
+      }
+      const [movedItem] = sourceItems.splice(sourceIndex, 1)
+      const insertIndex = this.getInsertIndex(prevState, overListId, overId)
+      destinationItems.splice(insertIndex, 0, movedItem)
+
+      return {
+        dynamicState: {
+          ...prevState.dynamicState,
+          [activeListId]: sourceItems,
+          [overListId]: destinationItems,
+        },
+        opPushValues: prevState.opPushValues,
+      }
+    })
   }
 
   componentDidUpdate(prevProps: ScratchDndProps) {
@@ -399,190 +610,81 @@ export default class ScratchDnd extends Component<
 
   render() {
     return (
-      <DragDropContext onDragEnd={this.onDragEnd}>
-        {Object.keys(this.state.dynamicState).map((list, i) => {
+      <DndContext
+        sensors={this.sensors}
+        collisionDetection={closestCenter}
+        onDragStart={this.handleDragStart}
+        onDragEnd={this.handleDragEnd}
+        onDragCancel={this.handleDragCancel}
+      >
+        {Object.keys(this.state.dynamicState).map((listId) => {
+          const listItems = this.state.dynamicState[listId]
           return (
-            <div key={i} className="border-b border-white/25 px-5 pt-[15px]">
+            <div
+              key={listId}
+              className="border-b border-white/25 px-5 pt-[15px]"
+            >
               <p className="font-space-mono text-[15px] font-bold">
                 Your script
               </p>
-              <Droppable key={list} droppableId={list} direction="horizontal">
-                {(provided, _snapshot) => (
-                  <div
-                    className={clsx(
-                      'flex h-[40px] w-full flex-row whitespace-nowrap font-space-mono',
-                      {
-                        'overflow-hidden':
-                          this.state.dynamicState[list].length === 0,
-                        'overflow-x-auto overflow-y-hidden':
-                          this.state.dynamicState[list].length > 0,
-                      }
-                    )}
-                    ref={provided.innerRef}
-                  >
-                    {this.state.dynamicState[list].length ? (
-                      this.state.dynamicState[list].map((item, index) => (
-                        <Draggable
-                          key={item.id}
-                          draggableId={item.id.toString()}
-                          index={index}
-                        >
-                          {(provided, _snapshot) => (
-                            <div
-                              id={item.id}
-                              className={clsx(
-                                'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white'
-                              )}
-                              ref={provided.innerRef}
-                              {...provided.draggableProps}
-                              {...provided.dragHandleProps}
-                              style={provided.draggableProps.style}
-                            >
-                              <span
-                                className={clsx(
-                                  'flex items-center whitespace-nowrap',
-                                  {
-                                    'px-1.5': item.content !== 'OP_PUSH',
-                                    'pl-1.5': item.content === 'OP_PUSH',
-                                  }
-                                )}
-                              >
-                                {item.content}
-                                {item.content === 'OP_PUSH' && (
-                                  <input
-                                    key={item.id}
-                                    id={item.id}
-                                    className="ml-2 mr-1 h-5 w-auto grow bg-white/20 px-1 text-white placeholder:text-white/50"
-                                    placeholder="PUSH_DATA"
-                                    type="text"
-                                    value={
-                                      this.state.opPushValues[item.id] || ''
-                                    }
-                                    onChange={(e) =>
-                                      this.handleOpPushChange(
-                                        item.id,
-                                        e.target.value,
-                                        e
-                                      )
-                                    }
-                                  />
-                                )}
-                              </span>
-                            </div>
-                          )}
-                        </Draggable>
-                      ))
-                    ) : (
-                      <div className="relative flex h-[40px] min-w-full select-none content-center items-start justify-start overflow-hidden text-[15px] text-white/50">
-                        Drag OP_CODES here to build your script...
-                      </div>
-                    )}
-                    {provided.placeholder}
-                  </div>
+              <ScriptDropZone
+                id={getListDroppableId(listId)}
+                className={clsx(
+                  'flex h-[40px] w-full flex-row whitespace-nowrap font-space-mono',
+                  {
+                    'overflow-hidden': listItems.length === 0,
+                    'overflow-x-auto overflow-y-hidden': listItems.length > 0,
+                  }
                 )}
-              </Droppable>
+              >
+                <SortableContext
+                  items={listItems.map((item) => item.id)}
+                  strategy={horizontalListSortingStrategy}
+                >
+                  {listItems.length ? (
+                    listItems.map((item) => (
+                      <SortableScriptItem
+                        key={item.id}
+                        item={item}
+                        listId={listId}
+                        opPushValue={this.state.opPushValues[item.id]}
+                        onOpPushChange={this.handleOpPushChange}
+                      />
+                    ))
+                  ) : (
+                    <div className="relative flex h-[40px] min-w-full select-none content-center items-start justify-start overflow-hidden text-[15px] text-white/50">
+                      Drag OP_CODES here to build your script...
+                    </div>
+                  )}
+                </SortableContext>
+              </ScriptDropZone>
             </div>
           )
         })}
-        <Droppable
-          droppableId="ITEMS"
-          isDropDisabled={true}
-          direction="horizontal"
+        <div
+          className="flex h-full flex-col gap-y-2.5 overflow-y-auto bg-black/10 px-5 py-[15px]"
+          dir="rtl"
         >
-          {(provided, _snapshot) => (
+          {this.state.groupedItems.map((group, groupIndex) => (
             <div
-              className="flex h-full flex-col gap-y-2.5 overflow-y-auto bg-black/10 px-5 py-[15px]"
-              dir="rtl"
-              ref={provided.innerRef}
+              key={groupIndex}
+              className="flex flex-row-reverse font-space-mono"
             >
-              {this.state.groupedItems.map((group, groupIndex) => (
-                <div
-                  key={groupIndex}
-                  className="flex flex-row-reverse font-space-mono"
-                >
-                  <h2 className="w-fit min-w-[100px] select-none text-left text-[13px] font-semibold">
-                    {group.heading}
-                  </h2>
-                  <div className="flex w-full flex-row-reverse flex-wrap gap-y-2.5 overflow-x-auto pl-1">
-                    {group.items.map((item, _index) => (
-                      <Draggable
-                        key={item.id}
-                        draggableId={item.id.toString()}
-                        index={item.index}
-                      >
-                        {(provided, snapshot) => (
-                          <>
-                            <div
-                              id={item.id}
-                              className={clsx(
-                                'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white'
-                              )}
-                              ref={provided.innerRef}
-                              {...provided.draggableProps}
-                              {...provided.dragHandleProps}
-                              style={provided.draggableProps.style}
-                              onClick={() => this.handleItemClick(item)}
-                            >
-                              <span
-                                className={clsx('flex items-center', {
-                                  'px-1.5': item.content !== 'OP_PUSH',
-                                  'pl-1.5': item.content === 'OP_PUSH',
-                                })}
-                              >
-                                {item.content === 'OP_PUSH' && (
-                                  <input
-                                    key={item.id}
-                                    id={item.id}
-                                    className={clsx(
-                                      'pointer-events-none ml-2 mr-1 w-auto cursor-text rounded-sm bg-white/20 px-1 text-left placeholder:text-white/50'
-                                    )}
-                                    type="text"
-                                    placeholder="PUSH_DATA"
-                                  />
-                                )}
-                                {item.content}
-                              </span>
-                            </div>
-                            {snapshot.isDragging && (
-                              <div className="clone">
-                                <div
-                                  className={clsx(
-                                    'relative mr-[5px] flex h-[25px] select-none items-center rounded-sm bg-black/30 text-[13px] font-normal text-white'
-                                  )}
-                                >
-                                  <span
-                                    className={clsx('flex items-center', {
-                                      'px-1.5': item.content !== 'OP_PUSH',
-                                      'pl-1.5': item.content === 'OP_PUSH',
-                                    })}
-                                  >
-                                    {item.content === 'OP_PUSH' && (
-                                      <input
-                                        key={item.id}
-                                        id={item.id}
-                                        className={clsx(
-                                          'pointer-events-none ml-2 mr-1 h-5 w-auto cursor-text rounded-sm bg-white/20 px-1 text-left placeholder:text-white/50'
-                                        )}
-                                        type="text"
-                                        placeholder="PUSH_DATA"
-                                      />
-                                    )}
-                                    {item.content}
-                                  </span>
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </Draggable>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              {provided.placeholder}
+              <h2 className="w-fit min-w-[100px] select-none text-left text-[13px] font-semibold">
+                {group.heading}
+              </h2>
+              <div className="flex w-full flex-row-reverse flex-wrap gap-y-2.5 overflow-x-auto pl-1">
+                {group.items.map((item) => (
+                  <DraggableToolboxItem
+                    key={item.id}
+                    item={item}
+                    onClick={this.handleItemClick}
+                  />
+                ))}
+              </div>
             </div>
-          )}
-        </Droppable>
+          ))}
+        </div>
         <div className="flex justify-end bg-black/10">
           <button
             className="false m-2 inline-block max-w-[max-content] justify-center rounded-[3px] bg-white px-12 px-2.5 py-1 text-center font-nunito text-base font-bold  text-back transition duration-150 ease-in-out hover:bg-white/75"
@@ -600,7 +702,41 @@ export default class ScratchDnd extends Component<
             Paste From Clipboard
           </button>
         </div>
-      </DragDropContext>
+        {typeof document !== 'undefined' &&
+          createPortal(
+            <DragOverlay>
+              {this.state.activeDrag && (
+                <div className="flex h-[25px] cursor-grabbing select-none items-center rounded-sm bg-black/30 font-space-mono text-[13px] font-normal text-white">
+                  <span
+                    className={clsx('flex items-center whitespace-nowrap', {
+                      'px-1.5':
+                        this.state.activeDrag.item.content !== 'OP_PUSH',
+                      'pl-1.5':
+                        this.state.activeDrag.item.content === 'OP_PUSH',
+                    })}
+                  >
+                    {this.state.activeDrag.item.content}
+                    {this.state.activeDrag.item.content === 'OP_PUSH' && (
+                      <span
+                        className={clsx(
+                          'ml-2 mr-1 flex h-5 items-center rounded-sm bg-white/20 px-1',
+                          this.state.opPushValues[this.state.activeDrag.item.id]
+                            ? 'text-white'
+                            : 'text-white/50'
+                        )}
+                      >
+                        {this.state.opPushValues[
+                          this.state.activeDrag.item.id
+                        ] || 'PUSH_DATA'}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              )}
+            </DragOverlay>,
+            document.body
+          )}
+      </DndContext>
     )
   }
 }
